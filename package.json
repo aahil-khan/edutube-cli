@@ -1,0 +1,24 @@
+{
+  "name": "edutube-cli",
+  "version": "0.1.0",
+  "description": "EduTube workstation CLI — sync course tree and upload lectures",
+  "type": "module",
+  "bin": {
+    "edutube": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "node --import tsx src/index.ts"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "commander": "^12.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
