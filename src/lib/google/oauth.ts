@@ -38,6 +38,31 @@ export async function loadGoogleTokens(): Promise<Credentials | null> {
     return JSON.parse(raw) as Credentials;
 }
 
+/**
+ * Returns true if we have tokens on disk and they still work (refreshes access token if needed).
+ * Persists refreshed credentials back to disk when Google rotates the access token.
+ */
+export async function tryUseSavedGoogleTokens(): Promise<boolean> {
+    const existing = await loadGoogleTokens();
+    if (!existing?.refresh_token && !existing?.access_token) {
+        return false;
+    }
+    try {
+        const client = createOAuth2Client();
+        client.setCredentials(existing);
+        await client.getAccessToken();
+        const next = client.credentials;
+        const merged: Credentials = { ...existing, ...next };
+        if (existing.refresh_token && merged.refresh_token === undefined) {
+            merged.refresh_token = existing.refresh_token;
+        }
+        await saveGoogleTokens(merged);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
 export function createOAuth2Client(): OAuth2Client {
     const { clientId, clientSecret } = readGoogleClientEnv();
     return new OAuth2Client(clientId, clientSecret, getOAuthRedirectUri());
@@ -111,6 +136,21 @@ export async function runGoogleAuthInteractive(): Promise<void> {
     oauth2Client.setCredentials(tokens);
     await saveGoogleTokens(tokens);
     console.log(`Saved tokens to ${googleTokenPath()}`);
+}
+
+/**
+ * Skip browser if tokens already exist and validate; use `--force` to re-consent or fix a broken file.
+ */
+export async function runGoogleAuthFlow(opts: { force?: boolean } = {}): Promise<void> {
+    if (!opts.force) {
+        const ok = await tryUseSavedGoogleTokens();
+        if (ok) {
+            console.log(`Google OAuth already OK — using ${googleTokenPath()}`);
+            console.log('Pass --force to sign in again (new account or refresh consent).');
+            return;
+        }
+    }
+    await runGoogleAuthInteractive();
 }
 
 export async function getOAuthClientForYouTube(): Promise<OAuth2Client> {

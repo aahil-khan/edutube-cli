@@ -22,7 +22,7 @@ import {
 import { getVideoIdFromUrl } from './lib/youtube.js';
 import { bootstrapBackendUrl, findWorkspaceRoot } from './lib/workspace/config.js';
 import { runInit } from './lib/workspace/initWorkspace.js';
-import { runGoogleAuthInteractive } from './lib/google/oauth.js';
+import { runGoogleAuthFlow } from './lib/google/oauth.js';
 import { runJobUpload } from './lib/jobs/run-upload.js';
 import { runPull } from './lib/sync/pull.js';
 
@@ -103,9 +103,10 @@ authCli
     .description(
         'OAuth 2.0 for YouTube upload. Set EDUTUBE_GOOGLE_CLIENT_ID / EDUTUBE_GOOGLE_CLIENT_SECRET (Desktop client). Add authorized redirect: http://127.0.0.1:38475/oauth2callback (or EDUTUBE_OAUTH_PORT).'
     )
-    .action(async () => {
+    .option('--force', 'Always open the browser (ignore working saved tokens)')
+    .action(async (opts: { force?: boolean }) => {
         try {
-            await runGoogleAuthInteractive();
+            await runGoogleAuthFlow({ force: opts.force === true });
             process.exitCode = 0;
         } catch (e) {
             console.error(e instanceof Error ? e.message : e);
