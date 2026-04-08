@@ -50,7 +50,9 @@ export async function runGoogleAuthInteractive(): Promise<void> {
     const authUrl = oauth2Client.generateAuthUrl({
         access_type: 'offline',
         prompt: 'consent',
-        scope: SCOPES
+        scope: SCOPES,
+        /** Explicit for spec; also avoids broken requests if URL is ever truncated (e.g. Windows shell). */
+        response_type: 'code'
     });
 
     const code = await new Promise<string>((resolve, reject) => {
@@ -91,7 +93,8 @@ export async function runGoogleAuthInteractive(): Promise<void> {
             void import('node:child_process').then(({ execFile }) => {
                 try {
                     if (process.platform === 'win32') {
-                        execFile('cmd', ['/c', 'start', '', authUrl], () => {});
+                        /** Do not use `cmd /c start` — `&` in the query string is treated as CMD chaining and truncates the URL. */
+                        execFile('rundll32', ['url.dll,FileProtocolHandler', authUrl], { windowsHide: true }, () => {});
                     } else if (process.platform === 'darwin') {
                         execFile('open', [authUrl], () => {});
                     } else {
