@@ -72,10 +72,20 @@ export async function runJobUpload(opts: {
                 error: null
             });
 
+            let lastProgressBucket = -1;
             const { videoId } = await uploadLocalVideo(auth, {
                 filePath: job.path,
                 title: opts.title,
-                description: opts.description
+                description: opts.description,
+                onUploadProgress: (loaded, total) => {
+                    const pct = total > 0 ? Math.min(100, Math.floor((100 * loaded) / total)) : 0;
+                    const bucket = Math.floor(pct / 5);
+                    if (bucket > lastProgressBucket || loaded >= total) {
+                        lastProgressBucket = bucket;
+                        updateJobState(db, job.id, { bytes_uploaded: loaded });
+                        console.error(`YouTube: uploading… ${pct}% (${loaded} / ${total} bytes)`);
+                    }
+                }
             });
             uploadedId = videoId;
 
@@ -83,6 +93,8 @@ export async function runJobUpload(opts: {
                 youtube_video_id: videoId,
                 state: 'pending_register'
             });
+
+            console.error(`YouTube: upload finished (id ${videoId}). Registering with EduTube backend…`);
 
             await bootstrapBackendUrl(opts.workspaceRoot);
 
@@ -104,6 +116,10 @@ export async function runJobUpload(opts: {
                 lecture_id: data.lecture.id,
                 error: null
             });
+
+            console.error(
+                `YouTube Studio may show "Processing" or 0% briefly; unlisted videos appear under Content → filter Visibility. Editor: https://studio.youtube.com/video/${videoId}/edit`
+            );
 
             return {
                 youtubeVideoId: videoId,
