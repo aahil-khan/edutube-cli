@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
 import { resolve } from 'node:path';
+import { getJobsDbPath, getJobByPath, insertJob, listJobs, openJobsDb } from './lib/db/jobs-db.js';
+import { largeFileWarnBytes, minVideoDurationSeconds } from './lib/env/thresholds.js';
+import { probeVideoFile } from './lib/ffprobe/probe.js';
 import {
     cliCreateChapter,
     cliRegisterLecture,
@@ -10,7 +13,7 @@ import {
     fetchCliTree
 } from './lib/api.js';
 import { getVideoIdFromUrl } from './lib/youtube.js';
-import { applyBackendUrlFromRc, readEdutuberc } from './lib/workspace/config.js';
+import { bootstrapBackendUrl, findWorkspaceRoot } from './lib/workspace/config.js';
 import { runInit } from './lib/workspace/initWorkspace.js';
 import { runPull } from './lib/sync/pull.js';
 
@@ -21,12 +24,20 @@ program.name('edutube').description('EduTube workstation CLI').version('0.1.0');
 program
     .command('init')
     .argument('[dir]', 'workspace directory (default: current directory)', '.')
-    .description('Create workspace and write .edutuberc (backend URL; use env EDUTUBE_BACKEND_URL when running init)')
+    .description('Create workspace and write .edutuberc with backend_url (no URL is hardcoded in the CLI binary)')
     .option('--force', 'Overwrite an existing .edutuberc')
-    .action(async (dir: string, opts: { force?: boolean }) => {
+    .option(
+        '--backend-url <url>',
+        'API base URL (e.g. https://api.example.com). If omitted, uses EDUTUBE_BACKEND_URL.'
+    )
+    .action(async (dir: string, opts: { force?: boolean; backendUrl?: string }) => {
         try {
             const root = resolve(dir);
-            const configPath = await runInit(root, { force: opts.force });
+            const url = (opts.backendUrl ?? process.env.EDUTUBE_BACKEND_URL)?.trim().replace(/\/$/, '');
+            if (!url) {
+                throw new Error('Pass --backend-url or set EDUTUBE_BACKEND_URL before running init.');
+            }
+            const configPath = await runInit(root, { force: opts.force, backendUrl: url });
             console.log(`Created ${configPath}`);
             console.log('Set EDUTUBE_API_KEY in your environment, then run: edutube pull');
             process.exitCode = 0;
@@ -46,11 +57,10 @@ program
     .action(async (dir: string, opts: { dryRun?: boolean }) => {
         try {
             const root = resolve(dir);
-            const rc = await readEdutuberc(root);
-            applyBackendUrlFromRc(rc);
-            if (!rc) {
+            await bootstrapBackendUrl(root);
+            if (!findWorkspaceRoot(root)) {
                 console.error(
-                    'Warning: no .edutuberc in this directory — using EDUTUBE_BACKEND_URL or default. Run `edutube init` to pin backend_url.'
+                    'Warning: no .edutuberc found walking up from this path — using EDUTUBE_BACKEND_URL only. Run `edutube init` in your workspace to pin backend_url in a file.'
                 );
             }
             const stats = await runPull(root, { dryRun: opts.dryRun === true });
@@ -78,10 +88,147 @@ program
     });
 
 program
+    .command('probe')
+    .argument('<file>', 'Video file to validate with ffprobe (same checks as upload pipeline)')
+    .description(
+        'Run ffprobe: duration, video stream, min duration / large-file rules (EDUTUBE_MIN_VIDEO_DURATION_SECONDS, EDUTUBE_LARGE_FILE_WARN_BYTES)'
+    )
+    .option('--json', 'Print raw probe result JSON only')
+    .action(async (file: string, opts: { json?: boolean }) => {
+        try {
+            const abs = resolve(file);
+            const r = probeVideoFile(abs);
+            if (opts.json) {
+                console.log(JSON.stringify(r, null, 2));
+                process.exitCode = r.ok ? 0 : 1;
+                return;
+            }
+            if (!r.ok) {
+                console.error(r.message);
+                if (r.ffprobeStderr) console.error(r.ffprobeStderr);
+                process.exitCode = 1;
+                return;
+            }
+            console.log(
+                JSON.stringify(
+                    {
+                        file: abs,
+                        duration_seconds: r.durationSeconds,
+                        file_size_bytes: r.fileSizeBytes,
+                        format: r.formatName,
+                        warn_large_file: r.warnLargeFile,
+                        min_duration_seconds: minVideoDurationSeconds(),
+                        large_file_warn_bytes: largeFileWarnBytes()
+                    },
+                    null,
+                    2
+                )
+            );
+            if (r.warnLargeFile) {
+                console.error(
+                    'Warning: file exceeds EDUTUBE_LARGE_FILE_WARN_BYTES — the future upload step will require confirmation.'
+                );
+            }
+            process.exitCode = 0;
+        } catch (e) {
+            console.error(e instanceof Error ? e.message : e);
+            process.exitCode = 1;
+        }
+    });
+
+const jobsCli = program.command('jobs').description('Local SQLite job journal (.edutube/jobs.sqlite)');
+
+jobsCli
+    .command('list')
+    .argument('[dir]', 'Workspace directory containing .edutuberc', '.')
+    .description('List upload jobs (newest first)')
+    .action(async (dir: string) => {
+        try {
+            const root = findWorkspaceRoot(resolve(dir));
+            if (!root) {
+                throw new Error('No .edutuberc found — run from your workspace or pass the workspace directory.');
+            }
+            const db = openJobsDb(root);
+            const rows = listJobs(db);
+            db.close();
+            console.log(JSON.stringify({ workspace: root, db: getJobsDbPath(root), jobs: rows }, null, 2));
+            process.exitCode = 0;
+        } catch (e) {
+            console.error(e instanceof Error ? e.message : e);
+            process.exitCode = 1;
+        }
+    });
+
+jobsCli
+    .command('enqueue')
+    .argument('<file>', 'Video file (ffprobe + SQLite row)')
+    .argument('[dir]', 'Workspace directory', '.')
+    .description('Probe file and store result in SQLite (pending_upload or failed_validation)')
+    .action(async (file: string, dir: string) => {
+        try {
+            const root = findWorkspaceRoot(resolve(dir));
+            if (!root) {
+                throw new Error('No .edutuberc found — run from workspace or pass [dir].');
+            }
+            const abs = resolve(file);
+            const r = probeVideoFile(abs);
+            const db = openJobsDb(root);
+            const existing = getJobByPath(db, abs);
+            if (existing) {
+                db.close();
+                throw new Error(`A job already exists for this path (job id ${existing.id}).`);
+            }
+            if (r.ok) {
+                const id = insertJob(db, {
+                    path: abs,
+                    state: 'pending_upload',
+                    duration_seconds: r.durationSeconds,
+                    file_size_bytes: r.fileSizeBytes,
+                    ffprobe_json: r.ffprobeJson
+                });
+                db.close();
+                console.log(
+                    JSON.stringify(
+                        {
+                            job_id: id,
+                            state: 'pending_upload',
+                            idempotency_key: `job_${id}`,
+                            warn_large_file: r.warnLargeFile
+                        },
+                        null,
+                        2
+                    )
+                );
+                if (r.warnLargeFile) {
+                    console.error(
+                        'Warning: file exceeds large-file threshold — future upload step will require confirmation.'
+                    );
+                }
+                process.exitCode = 0;
+            } else {
+                const id = insertJob(db, {
+                    path: abs,
+                    state: 'failed_validation',
+                    error: r.message,
+                    ffprobe_json: r.ffprobeJson
+                });
+                db.close();
+                console.error(r.message);
+                console.log(JSON.stringify({ job_id: id, state: 'failed_validation' }, null, 2));
+                process.exitCode = 1;
+            }
+        } catch (e) {
+            console.error(e instanceof Error ? e.message : e);
+            process.exitCode = 1;
+        }
+    });
+
+program
     .command('health')
     .description('Check CLI API key and backend connectivity (GET /api/cli/health)')
     .action(async () => {
         try {
+            await bootstrapBackendUrl(process.cwd());
             const { data } = await fetchCliHealth();
             console.log(JSON.stringify(data, null, 2));
             process.exitCode = 0;
@@ -96,6 +243,7 @@ program
     .description('Print full course tree JSON (GET /api/cli/tree)')
     .action(async () => {
         try {
+            await bootstrapBackendUrl(process.cwd());
             const { data } = await fetchCliTree();
             console.log(JSON.stringify(data, null, 2));
             process.exitCode = 0;
@@ -111,6 +259,7 @@ program
     .description('Print one course instance tree (GET /api/cli/course-instances/:id/tree)')
     .action(async (idStr: string) => {
         try {
+            await bootstrapBackendUrl(process.cwd());
             const id = parseInt(idStr, 10);
             if (Number.isNaN(id)) {
                 throw new Error('Invalid course instance id');
@@ -140,6 +289,7 @@ chapters
         number?: number;
     }) => {
         try {
+            await bootstrapBackendUrl(process.cwd());
             const body: Parameters<typeof cliCreateChapter>[0] = {
                 course_instance_id: opts.courseInstanceId,
                 name: opts.name,
@@ -182,6 +332,7 @@ lectures
             idempotencyKey?: string;
         }) => {
             try {
+                await bootstrapBackendUrl(process.cwd());
                 const vid = opts.youtubeVideoId ?? getVideoIdFromUrl(opts.youtubeUrl);
                 if (!vid) {
                     throw new Error('Could not parse youtube_video_id from --youtube-url; pass --youtube-video-id');
@@ -216,6 +367,7 @@ lectures
     .description('Look up lecture by video id (GET /api/cli/lectures/by-video/:videoId)')
     .action(async (videoId: string) => {
         try {
+            await bootstrapBackendUrl(process.cwd());
             const { data } = await fetchCliLectureByVideo(videoId);
             console.log(JSON.stringify(data, null, 2));
             process.exitCode = 0;
