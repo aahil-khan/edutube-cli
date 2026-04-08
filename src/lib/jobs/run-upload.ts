@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { cliRegisterLecture } from '../api.js';
+import { cliRegisterLecture, getBackendUrl } from '../api.js';
 import { jobIdempotencyKey, getJobById, openJobsDb, updateJobState } from '../db/jobs-db.js';
 import { largeFileWarnBytes } from '../env/thresholds.js';
 import { getOAuthClientForYouTube } from '../google/oauth.js';
@@ -9,6 +9,24 @@ import { bootstrapBackendUrl } from '../workspace/config.js';
 function isQuotaError(e: unknown): boolean {
     const x = e as { code?: number; response?: { status?: number } };
     return x.response?.status === 403 || x.code === 403;
+}
+
+/** Gaxios / YouTube often throw with little context; pull nested message when present. */
+function summarizeExternalError(e: unknown): string {
+    const x = e as {
+        response?: { status?: number; data?: { error?: { message?: string }; message?: string } };
+        message?: string;
+    };
+    if (x.response?.data) {
+        const d = x.response.data;
+        const inner =
+            typeof d === 'object' && d !== null && 'error' in d && typeof (d as { error?: { message?: string } }).error === 'object'
+                ? (d as { error?: { message?: string } }).error?.message
+                : undefined;
+        const text = inner ?? (typeof d === 'object' && d !== null && 'message' in d ? String((d as { message?: string }).message) : JSON.stringify(d));
+        return `HTTP ${x.response.status ?? '?'} — ${text}`;
+    }
+    return e instanceof Error ? e.message : String(e);
 }
 
 export async function runJobUpload(opts: {
@@ -93,7 +111,11 @@ export async function runJobUpload(opts: {
                 registerCreated: created === true
             };
         } catch (e) {
-            const msg = e instanceof Error ? e.message : String(e);
+            const raw = summarizeExternalError(e);
+            const msg =
+                uploadedId === undefined
+                    ? `YouTube: ${raw} — enable YouTube Data API v3 for your GCP project and ensure the signed-in account may upload.`
+                    : `Backend ${getBackendUrl()}: ${raw} — set EDUTUBE_API_KEY in this shell (same as edutube health); chapter_id must exist on that server.`;
             if (uploadedId !== undefined) {
                 updateJobState(db, job.id, {
                     state: 'failed_register',
@@ -105,7 +127,7 @@ export async function runJobUpload(opts: {
             } else {
                 updateJobState(db, job.id, { state: 'failed_upload', error: msg });
             }
-            throw e;
+            throw new Error(msg, { cause: e });
         }
     } finally {
         db.close();

@@ -88,20 +88,28 @@ function baseHeaders(): Record<string, string> {
 }
 
 function parseEnvelope<T>(statusCode: number, body: string): { data: T; created?: boolean } {
+    const ok = statusCode >= 200 && statusCode < 300;
+
+    if (!ok && (!body || !body.trim())) {
+        throw new Error(
+            `HTTP ${statusCode} from ${getBackendUrl()} (empty body). Check URL, TLS, and reverse proxy auth.`
+        );
+    }
+
     let json: { data: T; created?: boolean } | { error: { code: string; message: string; details?: unknown } };
     try {
         json = JSON.parse(body) as typeof json;
     } catch {
-        throw new Error('Invalid JSON from server');
+        const snippet = body.replace(/\s+/g, ' ').slice(0, 240);
+        throw new Error(`HTTP ${statusCode} from API (non-JSON): ${snippet}`);
     }
 
-    const ok = statusCode >= 200 && statusCode < 300;
     if (!ok || 'error' in json) {
         const msg =
-            'error' in json
-                ? `${json.error.code}: ${json.error.message}`
+            'error' in json && json.error && typeof json.error === 'object' && 'message' in json.error
+                ? `${(json.error as { code?: string }).code ?? 'ERROR'}: ${(json.error as { message: string }).message}`
                 : `HTTP ${statusCode}`;
-        throw new Error(msg);
+        throw new Error(`EduTube API ${msg}`);
     }
 
     return json as { data: T; created?: boolean };
