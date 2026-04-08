@@ -138,3 +138,21 @@ export function updateJobState(
 export function jobIdempotencyKey(jobId: number): string {
     return `job_${jobId}`;
 }
+
+/** After a failed upload (e.g. before `auth google`), put the job back to pending_upload. */
+export function resetJobForUploadRetry(db: Database.Database, id: number): JobRow {
+    const job = getJobById(db, id);
+    if (!job) {
+        throw new Error(`Job ${id} not found`);
+    }
+    if (job.state !== 'failed_upload' && job.state !== 'quota_exceeded') {
+        throw new Error(
+            `Job ${id} is "${job.state}". Only failed_upload or quota_exceeded can be reset to retry upload (use a new job if stuck in failed_register).`
+        );
+    }
+    updateJobState(db, id, {
+        state: 'pending_upload',
+        error: null
+    });
+    return getJobById(db, id)!;
+}

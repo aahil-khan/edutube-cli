@@ -1,7 +1,14 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
 import { resolve } from 'node:path';
-import { getJobsDbPath, getJobByPath, insertJob, listJobs, openJobsDb } from './lib/db/jobs-db.js';
+import {
+    getJobsDbPath,
+    getJobByPath,
+    insertJob,
+    listJobs,
+    openJobsDb,
+    resetJobForUploadRetry
+} from './lib/db/jobs-db.js';
 import { largeFileWarnBytes, minVideoDurationSeconds } from './lib/env/thresholds.js';
 import { probeVideoFile } from './lib/ffprobe/probe.js';
 import {
@@ -236,6 +243,32 @@ jobsCli
                 console.log(JSON.stringify({ job_id: id, state: 'failed_validation' }, null, 2));
                 process.exitCode = 1;
             }
+        } catch (e) {
+            console.error(e instanceof Error ? e.message : e);
+            process.exitCode = 1;
+        }
+    });
+
+jobsCli
+    .command('retry')
+    .argument('<jobId>', 'Job id to reset after failed_upload or quota_exceeded (e.g. forgot auth google)')
+    .argument('[dir]', 'Workspace directory', '.')
+    .description('Set job back to pending_upload so you can run jobs upload again')
+    .action(async (jobIdStr: string, dir: string) => {
+        try {
+            const root = findWorkspaceRoot(resolve(dir));
+            if (!root) {
+                throw new Error('No .edutuberc found — run from workspace or pass [dir].');
+            }
+            const jobId = parseInt(jobIdStr, 10);
+            if (Number.isNaN(jobId)) {
+                throw new Error('jobId must be a number');
+            }
+            const db = openJobsDb(root);
+            const row = resetJobForUploadRetry(db, jobId);
+            db.close();
+            console.log(JSON.stringify({ ok: true, job: row }, null, 2));
+            process.exitCode = 0;
         } catch (e) {
             console.error(e instanceof Error ? e.message : e);
             process.exitCode = 1;
