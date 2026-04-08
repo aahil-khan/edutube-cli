@@ -5,8 +5,7 @@ import type { CliLecture, CliTreeChapter, CliTreeCourseInstance, CliTreeResponse
 import type { ChapterSyncFile, CourseInstanceSyncFile, EdutubeSyncPayload, TeacherSyncFile, WorkspaceSyncFile } from '../../types/sync-metadata.js';
 import { fetchCliTree } from '../api.js';
 import { chapterDirName, courseInstanceDirName, lectureUrlFileName, teacherDirName } from './layout.js';
-
-const URL_LINE_ENDING = '\r\n';
+import { formatUrlShortcut } from './url-shortcut.js';
 
 export interface PullStats {
     workspaceRoot: string;
@@ -94,10 +93,6 @@ async function ensureDirResolved(
         warnings.push(`[dry-run] would create: ${canonicalPath}`);
     }
     return canonicalPath;
-}
-
-function formatUrlShortcut(targetUrl: string): string {
-    return `[InternetShortcut]${URL_LINE_ENDING}URL=${targetUrl}${URL_LINE_ENDING}`;
 }
 
 async function writeJson(path: string, value: unknown, dryRun: boolean): Promise<void> {

@@ -1,4 +1,5 @@
 import { existsSync } from 'node:fs';
+import type { CliLecture } from '../../types/cli-api.js';
 import { cliRegisterLecture, getBackendUrl } from '../api.js';
 import { jobIdempotencyKey, getJobById, openJobsDb, updateJobState } from '../db/jobs-db.js';
 import { largeFileWarnBytes } from '../env/thresholds.js';
@@ -37,7 +38,7 @@ export async function runJobUpload(opts: {
     description?: string;
     lectureNumber?: number;
     confirmLargeFile: boolean;
-}): Promise<{ youtubeVideoId: string; lectureId: number; registerCreated: boolean }> {
+}): Promise<{ youtubeVideoId: string; lectureId: number; registerCreated: boolean; lecture: CliLecture }> {
     const db = openJobsDb(opts.workspaceRoot);
     try {
         const job = getJobById(db, opts.jobId);
@@ -124,7 +125,8 @@ export async function runJobUpload(opts: {
             return {
                 youtubeVideoId: videoId,
                 lectureId: data.lecture.id,
-                registerCreated: created === true
+                registerCreated: created === true,
+                lecture: data.lecture
             };
         } catch (e) {
             const raw = summarizeExternalError(e);

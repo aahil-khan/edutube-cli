@@ -25,6 +25,7 @@ import { runInit } from './lib/workspace/initWorkspace.js';
 import { runGoogleAuthFlow } from './lib/google/oauth.js';
 import { runJobUpload } from './lib/jobs/run-upload.js';
 import { runPull } from './lib/sync/pull.js';
+import { runPush } from './lib/sync/push.js';
 
 const program = new Command();
 
@@ -95,6 +96,43 @@ program
             process.exitCode = 1;
         }
     });
+
+program
+    .command('push')
+    .argument('[dir]', 'Workspace directory (default: current directory)', '.')
+    .description(
+        'Create new chapter folders on the server, upload chapter .mp4 files (YouTube + register), write .url shortcuts, move sources to _uploaded/'
+    )
+    .option('--dry-run', 'Print planned operations only (no API calls, uploads, or file moves)')
+    .option('-y, --yes', 'Skip confirmation prompt')
+    .option(
+        '--i-understand-large-file',
+        'Required when any file exceeds EDUTUBE_LARGE_FILE_WARN_BYTES (same as jobs upload)'
+    )
+    .action(
+        async (
+            dir: string,
+            opts: { dryRun?: boolean; yes?: boolean; iUnderstandLargeFile?: boolean }
+        ) => {
+            try {
+                const root = findWorkspaceRoot(resolve(dir));
+                if (!root) {
+                    throw new Error('No .edutuberc found — run from your workspace or pass [dir].');
+                }
+                const summary = await runPush({
+                    workspaceRoot: root,
+                    dryRun: opts.dryRun === true,
+                    yes: opts.yes === true,
+                    confirmLargeFile: opts.iUnderstandLargeFile === true
+                });
+                console.log(JSON.stringify(summary, null, 2));
+                process.exitCode = summary.failed.length > 0 ? 1 : 0;
+            } catch (e) {
+                console.error(e instanceof Error ? e.message : e);
+                process.exitCode = 1;
+            }
+        }
+    );
 
 const authCli = program.command('auth').description('Sign in to external services (tokens outside the course workspace)');
 
