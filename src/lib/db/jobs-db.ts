@@ -69,6 +69,10 @@ export function getJobByPath(db: Database.Database, absolutePath: string): JobRo
     return db.prepare('SELECT * FROM jobs WHERE path = ?').get(absolutePath) as JobRow | undefined;
 }
 
+export function getJobById(db: Database.Database, id: number): JobRow | undefined {
+    return db.prepare('SELECT * FROM jobs WHERE id = ?').get(id) as JobRow | undefined;
+}
+
 export function insertJob(db: Database.Database, row: NewJobInsert): number {
     const now = new Date().toISOString();
     const info = db
@@ -109,6 +113,8 @@ export function updateJobState(
             | 'state'
             | 'duration_seconds'
             | 'file_size_bytes'
+            | 'chapter_id'
+            | 'title'
             | 'youtube_video_id'
             | 'lecture_id'
             | 'error'

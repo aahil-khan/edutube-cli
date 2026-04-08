@@ -15,6 +15,8 @@ import {
 import { getVideoIdFromUrl } from './lib/youtube.js';
 import { bootstrapBackendUrl, findWorkspaceRoot } from './lib/workspace/config.js';
 import { runInit } from './lib/workspace/initWorkspace.js';
+import { runGoogleAuthInteractive } from './lib/google/oauth.js';
+import { runJobUpload } from './lib/jobs/run-upload.js';
 import { runPull } from './lib/sync/pull.js';
 
 const program = new Command();
@@ -80,6 +82,23 @@ program
                     2
                 )
             );
+            process.exitCode = 0;
+        } catch (e) {
+            console.error(e instanceof Error ? e.message : e);
+            process.exitCode = 1;
+        }
+    });
+
+const authCli = program.command('auth').description('Sign in to external services (tokens outside the course workspace)');
+
+authCli
+    .command('google')
+    .description(
+        'OAuth 2.0 for YouTube upload. Set EDUTUBE_GOOGLE_CLIENT_ID / EDUTUBE_GOOGLE_CLIENT_SECRET (Desktop client). Add authorized redirect: http://127.0.0.1:38475/oauth2callback (or EDUTUBE_OAUTH_PORT).'
+    )
+    .action(async () => {
+        try {
+            await runGoogleAuthInteractive();
             process.exitCode = 0;
         } catch (e) {
             console.error(e instanceof Error ? e.message : e);
@@ -222,6 +241,69 @@ jobsCli
             process.exitCode = 1;
         }
     });
+
+jobsCli
+    .command('upload')
+    .argument('<jobId>', 'Job id from `edutube jobs list`')
+    .argument('[dir]', 'Workspace directory containing .edutuberc', '.')
+    .description('YouTube upload (unlisted) then POST /api/cli/lectures/register for a pending_upload job')
+    .requiredOption('--chapter-id <n>', 'Chapter id', (v) => parseInt(v, 10))
+    .requiredOption('--title <title>', 'Lecture title')
+    .option('--description <text>', 'Lecture description')
+    .option('--lecture-number <n>', 'Lecture order in chapter', (v) => parseInt(v, 10))
+    .option(
+        '--i-understand-large-file',
+        'Required when file size exceeds EDUTUBE_LARGE_FILE_WARN_BYTES (plan: confirm before consuming quota)'
+    )
+    .action(
+        async (
+            jobIdStr: string,
+            dir: string,
+            opts: {
+                chapterId: number;
+                title: string;
+                description?: string;
+                lectureNumber?: number;
+                iUnderstandLargeFile?: boolean;
+            }
+        ) => {
+            try {
+                const root = findWorkspaceRoot(resolve(dir));
+                if (!root) {
+                    throw new Error('No .edutuberc found — run from workspace or pass [dir].');
+                }
+                const jobId = parseInt(jobIdStr, 10);
+                if (Number.isNaN(jobId)) {
+                    throw new Error('jobId must be a positive integer');
+                }
+                const result = await runJobUpload({
+                    workspaceRoot: root,
+                    jobId,
+                    chapterId: opts.chapterId,
+                    title: opts.title,
+                    description: opts.description,
+                    lectureNumber: opts.lectureNumber,
+                    confirmLargeFile: opts.iUnderstandLargeFile === true
+                });
+                console.log(
+                    JSON.stringify(
+                        {
+                            ok: true,
+                            youtube_video_id: result.youtubeVideoId,
+                            lecture_id: result.lectureId,
+                            register_created: result.registerCreated
+                        },
+                        null,
+                        2
+                    )
+                );
+                process.exitCode = 0;
+            } catch (e) {
+                console.error(e instanceof Error ? e.message : e);
+                process.exitCode = 1;
+            }
+        }
+    );
 
 program
     .command('health')
