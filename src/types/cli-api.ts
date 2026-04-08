@@ -55,3 +55,33 @@ export interface CliTreeChapter {
     description: string | null;
     lectures: CliLecture[];
 }
+
+export interface CliCourseInstanceTreeData {
+    course_instance: {
+        id: number;
+        instance_name: string | null;
+        is_active: boolean;
+        teacher: { id: number; display_name: string };
+        course_template: {
+            id: number;
+            course_code: string;
+            name: string;
+            description: string | null;
+        };
+        chapters: CliTreeChapter[];
+    };
+}
+
+export interface CliCreateChapterData {
+    chapter: {
+        id: number;
+        course_instance_id: number;
+        number: number;
+        name: string;
+        description: string | null;
+    };
+}
+
+export interface CliRegisterLectureData {
+    lecture: CliLecture;
+}

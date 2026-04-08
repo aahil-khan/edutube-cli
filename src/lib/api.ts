@@ -1,7 +1,13 @@
 import http from 'node:http';
 import https from 'node:https';
 import type { IncomingMessage } from 'node:http';
-import type { CliHealthData, CliTreeResponse } from '../types/cli-api.js';
+import type {
+    CliCourseInstanceTreeData,
+    CliCreateChapterData,
+    CliHealthData,
+    CliRegisterLectureData,
+    CliTreeResponse
+} from '../types/cli-api.js';
 
 function getEnv(name: string, fallback?: string): string {
     const v = process.env[name];
@@ -18,12 +24,26 @@ export function getCliApiKey(): string {
     return getEnv('EDUTUBE_API_KEY');
 }
 
-/** Plain http(s) — avoids undici/fetch teardown issues on Windows (libuv UV_HANDLE_CLOSING). */
-function cliHttpGet(urlStr: string, headers: Record<string, string>): Promise<{ statusCode: number; body: string }> {
+type HttpMethod = 'GET' | 'POST';
+
+/** Plain http(s), `agent: false` — avoids undici/fetch and Agent lifecycle issues on Windows (libuv). */
+function cliHttpRequest(
+    method: HttpMethod,
+    urlStr: string,
+    headers: Record<string, string>,
+    jsonBody?: Record<string, unknown>
+): Promise<{ statusCode: number; body: string }> {
     return new Promise((resolve, reject) => {
         const u = new URL(urlStr);
         const isHttps = u.protocol === 'https:';
         const lib = isHttps ? https : http;
+
+        const payload = jsonBody !== undefined ? JSON.stringify(jsonBody) : undefined;
+        const mergedHeaders: Record<string, string> = { ...headers };
+        if (payload !== undefined) {
+            mergedHeaders['Content-Type'] = 'application/json';
+            mergedHeaders['Content-Length'] = String(Buffer.byteLength(payload, 'utf8'));
+        }
 
         const req = lib.request(
             {
@@ -31,9 +51,8 @@ function cliHttpGet(urlStr: string, headers: Record<string, string>): Promise<{ 
                 hostname: u.hostname,
                 port: u.port || (isHttps ? 443 : 80),
                 path: `${u.pathname}${u.search}`,
-                method: 'GET',
-                headers,
-                // Use a one-off socket instead of per-request Agent lifecycle.
+                method,
+                headers: mergedHeaders,
                 agent: false
             },
             (res: IncomingMessage) => {
@@ -50,21 +69,25 @@ function cliHttpGet(urlStr: string, headers: Record<string, string>): Promise<{ 
         );
 
         req.on('error', reject);
-        req.setTimeout(60_000, () => {
+        req.setTimeout(120_000, () => {
             req.destroy();
             reject(new Error('Request timeout'));
         });
+        if (payload !== undefined) {
+            req.write(payload, 'utf8');
+        }
         req.end();
     });
 }
 
-async function cliFetch<T>(path: string): Promise<{ data: T; created?: boolean }> {
-    const url = `${getBackendUrl().replace(/\/$/, '')}${path.startsWith('/') ? path : `/${path}`}`;
-    const { statusCode, body } = await cliHttpGet(url, {
+function baseHeaders(): Record<string, string> {
+    return {
         'Content-Type': 'application/json',
         'X-CLI-API-Key': getCliApiKey()
-    });
+    };
+}
 
+function parseEnvelope<T>(statusCode: number, body: string): { data: T; created?: boolean } {
     let json: { data: T; created?: boolean } | { error: { code: string; message: string; details?: unknown } };
     try {
         json = JSON.parse(body) as typeof json;
@@ -84,10 +107,68 @@ async function cliFetch<T>(path: string): Promise<{ data: T; created?: boolean }
     return json as { data: T; created?: boolean };
 }
 
+async function cliGet<T>(path: string): Promise<{ data: T; created?: boolean }> {
+    const url = `${getBackendUrl().replace(/\/$/, '')}${path.startsWith('/') ? path : `/${path}`}`;
+    const { statusCode, body } = await cliHttpRequest('GET', url, baseHeaders());
+    return parseEnvelope<T>(statusCode, body);
+}
+
+async function cliPost<T>(path: string, jsonBody: Record<string, unknown>): Promise<{ data: T; created?: boolean }> {
+    const url = `${getBackendUrl().replace(/\/$/, '')}${path.startsWith('/') ? path : `/${path}`}`;
+    const { statusCode, body } = await cliHttpRequest('POST', url, baseHeaders(), jsonBody);
+    return parseEnvelope<T>(statusCode, body);
+}
+
 export async function fetchCliHealth(): Promise<{ data: CliHealthData; created?: boolean }> {
-    return cliFetch<CliHealthData>('/api/cli/health');
+    return cliGet<CliHealthData>('/api/cli/health');
 }
 
 export async function fetchCliTree(): Promise<{ data: CliTreeResponse; created?: boolean }> {
-    return cliFetch<CliTreeResponse>('/api/cli/tree');
+    return cliGet<CliTreeResponse>('/api/cli/tree');
+}
+
+export async function fetchCliCourseInstanceTree(
+    courseInstanceId: number
+): Promise<{ data: CliCourseInstanceTreeData; created?: boolean }> {
+    const id = encodeURIComponent(String(courseInstanceId));
+    return cliGet<CliCourseInstanceTreeData>(`/api/cli/course-instances/${id}/tree`);
+}
+
+export async function cliCreateChapter(body: {
+    course_instance_id: number;
+    name: string;
+    description?: string;
+    number?: number;
+}): Promise<{ data: CliCreateChapterData; created?: boolean }> {
+    return cliPost<CliCreateChapterData>('/api/cli/chapters', body as Record<string, unknown>);
+}
+
+export async function cliRegisterLecture(body: {
+    chapter_id: number;
+    title: string;
+    youtube_url: string;
+    youtube_video_id: string;
+    duration_seconds: number;
+    lecture_number?: number;
+    description?: string;
+    idempotency_key?: string;
+}): Promise<{ data: CliRegisterLectureData; created?: boolean }> {
+    const payload: Record<string, unknown> = {
+        chapter_id: body.chapter_id,
+        title: body.title,
+        youtube_url: body.youtube_url,
+        youtube_video_id: body.youtube_video_id,
+        duration_seconds: body.duration_seconds
+    };
+    if (body.lecture_number !== undefined) payload.lecture_number = body.lecture_number;
+    if (body.description !== undefined) payload.description = body.description;
+    if (body.idempotency_key !== undefined) payload.idempotency_key = body.idempotency_key;
+    return cliPost<CliRegisterLectureData>('/api/cli/lectures/register', payload);
+}
+
+export async function fetchCliLectureByVideo(
+    videoId: string
+): Promise<{ data: CliRegisterLectureData; created?: boolean }> {
+    const id = encodeURIComponent(videoId);
+    return cliGet<CliRegisterLectureData>(`/api/cli/lectures/by-video/${id}`);
 }
