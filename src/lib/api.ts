@@ -24,7 +24,6 @@ function cliHttpGet(urlStr: string, headers: Record<string, string>): Promise<{ 
         const u = new URL(urlStr);
         const isHttps = u.protocol === 'https:';
         const lib = isHttps ? https : http;
-        const agent = new lib.Agent({ keepAlive: false, maxSockets: 1 });
 
         const req = lib.request(
             {
@@ -34,7 +33,8 @@ function cliHttpGet(urlStr: string, headers: Record<string, string>): Promise<{ 
                 path: `${u.pathname}${u.search}`,
                 method: 'GET',
                 headers,
-                agent
+                // Use a one-off socket instead of per-request Agent lifecycle.
+                agent: false
             },
             (res: IncomingMessage) => {
                 const chunks: Buffer[] = [];
