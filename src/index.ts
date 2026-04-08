@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
+import { resolve } from 'node:path';
 import {
     cliCreateChapter,
     cliRegisterLecture,
@@ -9,10 +10,72 @@ import {
     fetchCliTree
 } from './lib/api.js';
 import { getVideoIdFromUrl } from './lib/youtube.js';
+import { applyBackendUrlFromRc, readEdutuberc } from './lib/workspace/config.js';
+import { runInit } from './lib/workspace/initWorkspace.js';
+import { runPull } from './lib/sync/pull.js';
 
 const program = new Command();
 
 program.name('edutube').description('EduTube workstation CLI').version('0.1.0');
+
+program
+    .command('init')
+    .argument('[dir]', 'workspace directory (default: current directory)', '.')
+    .description('Create workspace and write .edutuberc (backend URL; use env EDUTUBE_BACKEND_URL when running init)')
+    .option('--force', 'Overwrite an existing .edutuberc')
+    .action(async (dir: string, opts: { force?: boolean }) => {
+        try {
+            const root = resolve(dir);
+            const configPath = await runInit(root, { force: opts.force });
+            console.log(`Created ${configPath}`);
+            console.log('Set EDUTUBE_API_KEY in your environment, then run: edutube pull');
+            process.exitCode = 0;
+        } catch (e) {
+            console.error(e instanceof Error ? e.message : e);
+            process.exitCode = 1;
+        }
+    });
+
+program
+    .command('pull')
+    .argument('[dir]', 'workspace directory (default: current directory)', '.')
+    .description(
+        'Fetch GET /api/cli/tree and mirror folders, .edutube-sync metadata, and lecture .url shortcuts (Explorer sync MVP)'
+    )
+    .option('--dry-run', 'Print planned renames/creates/removals without writing')
+    .action(async (dir: string, opts: { dryRun?: boolean }) => {
+        try {
+            const root = resolve(dir);
+            const rc = await readEdutuberc(root);
+            applyBackendUrlFromRc(rc);
+            if (!rc) {
+                console.error(
+                    'Warning: no .edutuberc in this directory — using EDUTUBE_BACKEND_URL or default. Run `edutube init` to pin backend_url.'
+                );
+            }
+            const stats = await runPull(root, { dryRun: opts.dryRun === true });
+            console.log(
+                JSON.stringify(
+                    {
+                        dry_run: stats.dryRun,
+                        workspace: stats.workspaceRoot,
+                        teachers: stats.teachers,
+                        course_instances: stats.courseInstances,
+                        chapters: stats.chapters,
+                        lecture_urls_written_or_updated: stats.lecturesWritten,
+                        orphan_lecture_urls_removed: stats.urlsRemoved,
+                        warnings: stats.warnings.length > 0 ? stats.warnings : undefined
+                    },
+                    null,
+                    2
+                )
+            );
+            process.exitCode = 0;
+        } catch (e) {
+            console.error(e instanceof Error ? e.message : e);
+            process.exitCode = 1;
+        }
+    });
 
 program
     .command('health')
