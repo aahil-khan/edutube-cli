@@ -39,12 +39,12 @@ export async function loadGoogleTokens(): Promise<Credentials | null> {
 }
 
 /**
- * Returns true if we have tokens on disk and they still work (refreshes access token if needed).
- * Persists refreshed credentials back to disk when Google rotates the access token.
+ * Returns true if we have a refresh token on disk and can obtain a valid access token.
+ * Without refresh_token, uploads fail with HTTP 401 once the access token expires (~1h) or immediately on some APIs.
  */
 export async function tryUseSavedGoogleTokens(): Promise<boolean> {
     const existing = await loadGoogleTokens();
-    if (!existing?.refresh_token && !existing?.access_token) {
+    if (!existing?.refresh_token) {
         return false;
     }
     try {
@@ -136,6 +136,16 @@ export async function runGoogleAuthInteractive(): Promise<void> {
     oauth2Client.setCredentials(tokens);
     await saveGoogleTokens(tokens);
     console.log(`Saved tokens to ${googleTokenPath()}`);
+    if (!tokens.refresh_token) {
+        console.error(
+            '\nWARNING: Google did not return a refresh_token. YouTube uploads often fail with HTTP 401.\n' +
+                'Do this once:\n' +
+                '  1) Open https://myaccount.google.com/permissions — remove access for this OAuth app.\n' +
+                '  2) Run: edutube auth google --force\n' +
+                '  3) Sign in again and accept consent (same Google account you use for YouTube).\n' +
+                'Ensure the OAuth client is type "Desktop" and YouTube Data API v3 is enabled on that GCP project.\n'
+        );
+    }
 }
 
 /**
@@ -158,6 +168,11 @@ export async function getOAuthClientForYouTube(): Promise<OAuth2Client> {
     const tokens = await loadGoogleTokens();
     if (!tokens?.refresh_token && !tokens?.access_token) {
         throw new Error('Not signed in to Google. Run: edutube auth google');
+    }
+    if (!tokens.refresh_token) {
+        throw new Error(
+            `Missing refresh_token in ${googleTokenPath()}. Run: edutube auth google --force (revoke app at https://myaccount.google.com/permissions first if needed).`
+        );
     }
     oauth2Client.setCredentials(tokens);
     return oauth2Client;
