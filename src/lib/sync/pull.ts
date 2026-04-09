@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, readdir, rename, writeFile, rm } from 'node:fs/promises';
-import { join } from 'node:path';
+import { mkdir, readFile, readdir, rename, writeFile, rm, lstat } from 'node:fs/promises';
+import { basename, join } from 'node:path';
 import type { CliLecture, CliTreeChapter, CliTreeCourseInstance, CliTreeResponse, CliTreeTeacher } from '../../types/cli-api.js';
 import type { ChapterSyncFile, CourseInstanceSyncFile, EdutubeSyncPayload, TeacherSyncFile, WorkspaceSyncFile } from '../../types/sync-metadata.js';
 import { fetchCliTree } from '../api.js';
@@ -33,9 +33,73 @@ async function readSyncPayload(dir: string): Promise<EdutubeSyncPayload | null> 
     }
 }
 
+function syncMatchesKindId(payload: EdutubeSyncPayload | null, kind: 'teacher' | 'course_instance' | 'chapter', id: number): boolean {
+    return Boolean(payload && 'kind' in payload && payload.kind === kind && 'id' in payload && (payload as { id: number }).id === id);
+}
+
+/** Subdirectories whose `.edutube-sync` claims this entity (same `kind` + `id`). */
+async function findDirsWithKindAndId(
+    parentDir: string,
+    kind: 'teacher' | 'course_instance' | 'chapter',
+    id: number
+): Promise<string[]> {
+    if (!existsSync(parentDir)) return [];
+    let entries: import('node:fs').Dirent[];
+    try {
+        entries = await readdir(parentDir, { withFileTypes: true });
+    } catch {
+        return [];
+    }
+    const out: string[] = [];
+    for (const ent of entries) {
+        if (!ent.isDirectory() || ent.name.startsWith('.')) continue;
+        const dirPath = join(parentDir, ent.name);
+        const payload = await readSyncPayload(dirPath);
+        if (syncMatchesKindId(payload, kind, id)) {
+            out.push(dirPath);
+        }
+    }
+    return out;
+}
+
 /**
- * If the canonical folder name does not exist, look for a sibling directory whose
- * `.edutube-sync` matches `kind` + `id`, and rename it to the canonical name.
+ * Move children from `fromDir` into `toDir` (destination wins on name clash). Skips `.edutube-sync`
+ * from the source so the tree metadata written by pull stays authoritative. Removes `fromDir` when done.
+ */
+async function mergeDirIntoPreferDestination(fromDir: string, toDir: string, dryRun: boolean, warnings: string[]): Promise<void> {
+    if (dryRun) return;
+    const entries = await readdir(fromDir, { withFileTypes: true });
+    for (const ent of entries) {
+        const name = ent.name;
+        if (name === '.edutube-sync') continue;
+        const from = join(fromDir, name);
+        const to = join(toDir, name);
+        if (!existsSync(to)) {
+            await rename(from, to);
+            continue;
+        }
+        const fromStat = await lstat(from);
+        const toStat = await lstat(to);
+        if (ent.isDirectory() && fromStat.isDirectory() && toStat.isDirectory()) {
+            await mergeDirIntoPreferDestination(from, to, dryRun, warnings);
+        } else {
+            warnings.push(`Merge conflict: keeping destination ${to}`);
+            if (fromStat.isDirectory()) {
+                await rm(from, { recursive: true, force: true });
+            } else {
+                await rm(from, { force: true });
+            }
+        }
+    }
+    await rm(fromDir, { recursive: true, force: true });
+}
+
+/**
+ * Resolve the folder for a teacher / course instance / chapter:
+ * - Canonical name comes from the API (`NN_title`, `Tid_name`, etc.).
+ * - If the admin renames a chapter (or similar), the old folder name may still exist with the same id
+ *   in `.edutube-sync`. We find **all** sibling dirs with that id and merge into the canonical path so
+ *   duplicate folders (e.g. `05_xyz` and `05_abc`) are not left behind.
  */
 async function ensureDirResolved(
     parentDir: string,
@@ -46,9 +110,6 @@ async function ensureDirResolved(
     warnings: string[]
 ): Promise<string> {
     const canonicalPath = join(parentDir, canonicalName);
-    if (existsSync(canonicalPath)) {
-        return canonicalPath;
-    }
 
     if (!existsSync(parentDir)) {
         if (dryRun) {
@@ -58,10 +119,20 @@ async function ensureDirResolved(
         await mkdir(parentDir, { recursive: true });
     }
 
-    let entries: import('node:fs').Dirent[];
-    try {
-        entries = await readdir(parentDir, { withFileTypes: true });
-    } catch {
+    // Something already at the canonical path without valid sync for this entity (empty stub, wrong id) blocks rename/merge.
+    if (existsSync(canonicalPath)) {
+        const payload = await readSyncPayload(canonicalPath);
+        if (!syncMatchesKindId(payload, kind, id)) {
+            warnings.push(`Remove folder blocking canonical name ${canonicalName}: ${canonicalPath}`);
+            if (!dryRun) {
+                await rm(canonicalPath, { recursive: true, force: true });
+            }
+        }
+    }
+
+    let matches = await findDirsWithKindAndId(parentDir, kind, id);
+
+    if (matches.length === 0) {
         if (!dryRun) {
             await mkdir(canonicalPath, { recursive: true });
         } else {
@@ -70,27 +141,49 @@ async function ensureDirResolved(
         return canonicalPath;
     }
 
-    for (const ent of entries) {
-        if (!ent.isDirectory() || ent.name.startsWith('.')) continue;
-        if (ent.name === canonicalName) continue;
-        const candidate = join(parentDir, ent.name);
-        const payload = await readSyncPayload(candidate);
-        if (!payload || !('kind' in payload)) continue;
-        if (payload.kind === kind && 'id' in payload && payload.id === id) {
-            if (ent.name !== canonicalName) {
-                warnings.push(`Rename folder: ${ent.name} → ${canonicalName}`);
-                if (!dryRun) {
-                    await rename(candidate, canonicalPath);
-                }
+    const atCanonical = matches.filter((p) => basename(p) === canonicalName);
+    const elsewhere = matches.filter((p) => basename(p) !== canonicalName);
+
+    // Single folder, wrong name → rename to canonical
+    if (matches.length === 1 && elsewhere.length === 1 && atCanonical.length === 0) {
+        const only = elsewhere[0];
+        warnings.push(`Rename folder: ${basename(only)} → ${canonicalName}`);
+        if (!dryRun) {
+            if (!existsSync(canonicalPath)) {
+                await rename(only, canonicalPath);
+            } else {
+                await mergeDirIntoPreferDestination(only, canonicalPath, dryRun, warnings);
             }
-            return canonicalPath;
         }
+        return canonicalPath;
     }
 
+    // Folder already at canonical name: absorb any other dirs with the same id (rename drift).
+    if (atCanonical.length >= 1) {
+        const keeper = join(parentDir, canonicalName);
+        for (const src of elsewhere) {
+            warnings.push(`Merge duplicate ${kind} id ${id}: ${basename(src)} → ${canonicalName}`);
+            if (!dryRun) {
+                await mergeDirIntoPreferDestination(src, keeper, dryRun, warnings);
+            }
+        }
+        return canonicalPath;
+    }
+
+    // Multiple dirs, none yet named canonically — pick one to rename, merge the rest
+    const primary = elsewhere[0];
+    const rest = elsewhere.slice(1);
+    warnings.push(`Rename folder: ${basename(primary)} → ${canonicalName}`);
     if (!dryRun) {
-        await mkdir(canonicalPath, { recursive: true });
-    } else {
-        warnings.push(`[dry-run] would create: ${canonicalPath}`);
+        if (!existsSync(canonicalPath)) {
+            await rename(primary, canonicalPath);
+        } else {
+            await mergeDirIntoPreferDestination(primary, canonicalPath, dryRun, warnings);
+        }
+        for (const src of rest) {
+            warnings.push(`Merge duplicate ${kind} id ${id}: ${basename(src)} → ${canonicalName}`);
+            await mergeDirIntoPreferDestination(src, canonicalPath, dryRun, warnings);
+        }
     }
     return canonicalPath;
 }
