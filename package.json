@@ -6,14 +6,21 @@
   "bin": {
     "edutube": "./dist/index.js"
   },
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsc",
-    "dev": "node --import tsx src/index.ts"
+    "dev": "node --import tsx src/index.ts",
+    "prepack": "npm run build",
+    "pack:tarball": "npm run build && npm pack"
   },
   "engines": {
     "node": ">=20"
   },
   "dependencies": {
+    "@ffprobe-installer/ffprobe": "^2.1.2",
     "better-sqlite3": "^12.8.0",
     "commander": "^12.1.0",
     "google-auth-library": "^10.6.2",
