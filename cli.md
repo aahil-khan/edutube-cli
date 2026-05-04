@@ -1,0 +1,5 @@
+
+export EDUTUBE_GOOGLE_CLIENT_ID=459200134114-klrh78ctfvu2at7kg4fvr3b9khn3l2s7.apps.googleusercontent.com
+export EDUTUBE_GOOGLE_CLIENT_SECRET=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
+export EDUTUBE_API_KEY=...
+export EDUTUBE_BACKEND_URL=https://backend-edutube.dctofficethapar.xyz
